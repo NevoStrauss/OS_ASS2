@@ -6,6 +6,12 @@
 #include "proc.h"
 #include "defs.h"
 
+extern uint64 cas(volatile void *addr, int expected, int newval);
+
+struct proc *zombie_list = 0;
+struct proc *sleeping_list = 0;
+struct proc *unused_list = 0;
+
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
@@ -424,7 +430,8 @@ wait(uint64 addr)
     // No point waiting if we don't have any children.
     if(!havekids || p->killed){
       release(&wait_lock);
-      return -1;
+      extern uint64 cas(volatile void *addr, int expected, int newval);
+return -1;
     }
     
     // Wait for a child to exit.
@@ -660,5 +667,54 @@ procdump(void)
   }
 }
 
-extern uint64 
-cas(volatile void *addr, int expected, int newval);
+void
+decrease_runnable_list_size_of(int cpu_id){
+  struct cpu* c = &cpus[cpu_id];
+  uint64 old;
+  do{
+    old = c->list_size;
+  } while(cas(&c->list_size, old, old-1));
+}
+
+void
+increase_runnable_list_size_of(int cpu_id){
+  struct cpu* c = &cpus[cpu_id];
+  uint64 old;
+  do{
+    old = c->list_size;
+  } while(cas(&c->list_size, old, old+1));
+}
+
+int 
+range_check(int num, int min, int max)
+{
+  if(!(num>=min && num<=max)){
+    return -1;
+  }
+  return 0;
+}
+
+
+int 
+set_cpu(int cpu_num)
+{
+  if(range_check(cpu_num,0,NCPU)<0){
+    return -1;
+  }
+  //remove proccess from current cpu runnable list
+  decrease_runnable_list_size_of(myproc()->cpu_num);
+  //set process's cpu num to new cpu runnable list
+  myproc()->cpu_num = cpu_num;
+  //increase new cpu runnable list
+  increase_runnable_list_size_of(cpu_num);
+  //process won’t keep running on the current CPU
+  //as it no longer belong to its list
+  yield();
+  return cpu_num;
+}
+
+int 
+get_cpu()
+{
+  return myproc()->cpu_num;
+}
