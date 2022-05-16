@@ -12,6 +12,16 @@ struct proc *zombie_list = 0;
 struct proc *sleeping_list = 0;
 struct proc *unused_list = 0;
 
+struct spinlock ready_lists_head_lock[CPUS];
+struct spinlock zombie_list_head_lock;
+struct spinlock sleeping_list_head_lock;
+struct spinlock unused_list_head_lock;
+
+// int RUNNABLE = 0;
+// int ZOMBIE = 1;
+// int SLEEPING = 2;
+// int UNUSED = 3;
+
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
@@ -31,6 +41,164 @@ extern char trampoline[]; // trampoline.S
 // memory model when using p->parent.
 // must be acquired before any p->lock.
 struct spinlock wait_lock;
+
+void
+acquire_list(int list_type, int cpu_num){
+  switch (list_type)
+  {
+  case 0:
+    acquire(&ready_lists_head_lock[cpu_num]);
+    break;
+  case 1:
+    acquire(&zombie_list_head_lock);
+    break;
+  case 2:
+    acquire(&sleeping_list_head_lock);
+    break;
+  case 3:
+    acquire(&unused_list_head_lock);
+    break;
+
+  default:
+    panic("list type doesn't exist");
+  }
+}
+
+void
+release_list(int list_type, int cpu_num){
+  switch (list_type)
+  {
+  case 0:
+    release(&ready_lists_head_lock[cpu_num]);
+    break;
+  case 1:
+    release(&zombie_list_head_lock);
+    break;
+  case 2:
+    release(&sleeping_list_head_lock);
+    break;
+  case 3:
+    release(&unused_list_head_lock);
+    break;
+
+  default:
+    panic("list type doesn't exist");
+  }}
+
+struct proc* 
+get_head(int list_type, int cpu_num) {
+  struct proc* p;
+  switch(list_type){
+    case 0:
+      p = cpus[cpu_num].runnable_list_head;
+      break;
+    case 1:
+      p = zombie_list;
+      break;
+    case 2:
+      p = sleeping_list;
+      break;
+    case 3:
+      p = unused_list;
+      break;
+
+    default:
+      panic("list type doesn't exist");
+  }
+  return p;
+}
+
+void
+set_head(struct proc *new_head, int list_type, int cpu_num){
+  switch (list_type){
+  case 0:
+    cpus[cpu_num].runnable_list_head = new_head;
+    break;
+  case 1:
+    zombie_list = new_head;
+    break;
+  case 2:
+    sleeping_list = new_head;
+    break;
+  case 3:
+    unused_list = new_head;
+    break;
+
+  
+  default:
+    panic("list type doesn't exist");
+  }
+}
+
+int
+remove_proc_from_list(struct proc *p, int list_type)
+{
+  acquire_list(list_type, p->cpu_num);
+  struct proc *curr = get_head(list_type, p->cpu_num);
+  if(!curr){
+    release_list(list_type, p->cpu_num);
+    return 0;
+  }
+  struct proc *prev = 0;
+  if (p == curr){ //p is head
+    acquire(&p->link_lock);
+    set_head(curr->next, list_type, p->cpu_num);
+    p->next = 0;
+    release(&p->link_lock);
+    release_list(list_type, p->cpu_num);
+    return 1;
+  }
+  //p is not head
+  while(curr){
+    acquire(&curr->link_lock);
+    if(p == curr){
+      acquire(&prev->link_lock);
+      release_list(list_type, p->cpu_num); //todo
+      prev->next = curr->next;
+      curr->next = 0;
+      release(&prev->link_lock);
+      release(&curr->link_lock);
+      return 1; 
+    }
+    else {
+      prev = curr;
+      curr = curr->next;
+      release(&prev->link_lock);
+    }
+
+    if(!prev){
+      release_list(list_type, p->cpu_num); //todo
+    }
+  }
+  return 0;
+}
+
+int
+add_proc_to_list(struct proc *p, int list_type, int cpu_num)
+{
+  struct proc *curr = 0;
+  acquire_list(list_type, cpu_num);
+  curr = get_head(list_type, p->cpu_num);
+  if(!curr){ //empty list
+    set_head(p, list_type, cpu_num);
+    release_list(list_type, cpu_num);
+    return 1;
+  }
+  struct proc *prev = 0;
+  while(curr){
+    acquire(&curr->link_lock);
+    if(!curr->next){
+      curr->next = p;
+      release(&curr->link_lock);
+      release_list(list_type, cpu_num);
+      return 1;
+    }
+    prev = curr;
+    curr = curr->next;
+    release(&prev->link_lock);
+  }
+  return 0;
+}
 
 // Allocate a page for each process's kernel stack.
 // Map it high in memory, followed by an invalid
