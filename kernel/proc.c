@@ -88,13 +88,18 @@ myproc(void) {
 int
 allocpid() {
   int pid;
-  
-  acquire(&pid_lock);
-  pid = nextpid;
-  nextpid = nextpid + 1;
-  release(&pid_lock);
+
+  do {
+    pid = nextpid;
+  } while (cas(&nextpid, pid, pid + 1));
 
   return pid;
+  
+  // old allocpid
+  // acquire(&pid_lock);
+  // pid = nextpid;
+  // nextpid = nextpid + 1;
+  // release(&pid_lock);
 }
 
 // Look in the process table for an UNUSED proc.
@@ -654,3 +659,6 @@ procdump(void)
     printf("\n");
   }
 }
+
+extern uint64 
+cas(volatile void *addr, int expected, int newval);
