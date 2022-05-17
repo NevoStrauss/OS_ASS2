@@ -7,20 +7,17 @@
 #include "defs.h"
 
 extern uint64 cas(volatile void *addr, int expected, int newval);
+struct proc* remove_head(enum procstate list_type, int cpu_num);
 
+int is_initialize = 0;
 struct proc *zombie_list = 0;
 struct proc *sleeping_list = 0;
 struct proc *unused_list = 0;
 
-struct spinlock ready_lists_head_lock[CPUS];
+struct spinlock ready_list_head_locks[CPUS];
 struct spinlock zombie_list_head_lock;
 struct spinlock sleeping_list_head_lock;
 struct spinlock unused_list_head_lock;
-
-// int RUNNABLE = 0;
-// int ZOMBIE = 1;
-// int SLEEPING = 2;
-// int UNUSED = 3;
 
 struct cpu cpus[NCPU];
 
@@ -43,19 +40,19 @@ extern char trampoline[]; // trampoline.S
 struct spinlock wait_lock;
 
 void
-acquire_list(int list_type, int cpu_num){
+acquire_list(enum procstate list_type, int cpu_num){
   switch (list_type)
   {
-  case 0:
-    acquire(&ready_lists_head_lock[cpu_num]);
+  case RUNNABLE:
+    acquire(&ready_list_head_locks[cpu_num]);
     break;
-  case 1:
+  case ZOMBIE:
     acquire(&zombie_list_head_lock);
     break;
-  case 2:
+  case SLEEPING:
     acquire(&sleeping_list_head_lock);
     break;
-  case 3:
+  case UNUSED:
     acquire(&unused_list_head_lock);
     break;
 
@@ -65,19 +62,19 @@ acquire_list(int list_type, int cpu_num){
 }
 
 void
-release_list(int list_type, int cpu_num){
+release_list(enum procstate list_type, int cpu_num){
   switch (list_type)
   {
-  case 0:
-    release(&ready_lists_head_lock[cpu_num]);
+  case RUNNABLE:
+    release(&ready_list_head_locks[cpu_num]);
     break;
-  case 1:
+  case ZOMBIE:
     release(&zombie_list_head_lock);
     break;
-  case 2:
+  case SLEEPING:
     release(&sleeping_list_head_lock);
     break;
-  case 3:
+  case UNUSED:
     release(&unused_list_head_lock);
     break;
 
@@ -86,41 +83,42 @@ release_list(int list_type, int cpu_num){
   }}
 
 struct proc* 
-get_head(int list_type, int cpu_num) {
+get_head(enum procstate list_type, int cpu_num) {
   struct proc* p;
   switch(list_type){
-    case 0:
+    case RUNNABLE:
       p = cpus[cpu_num].runnable_list_head;
       break;
-    case 1:
+    case ZOMBIE:
       p = zombie_list;
       break;
-    case 2:
+    case SLEEPING:
       p = sleeping_list;
       break;
-    case 3:
+    case UNUSED:
       p = unused_list;
       break;
 
     default:
       panic("list type doesn't exist");
   }
+
   return p;
 }
 
 void
-set_head(struct proc *new_head, int list_type, int cpu_num){
+set_head(struct proc *new_head, enum procstate list_type, int cpu_num){
   switch (list_type){
-  case 0:
+  case RUNNABLE:
     cpus[cpu_num].runnable_list_head = new_head;
     break;
-  case 1:
+  case ZOMBIE:
     zombie_list = new_head;
     break;
-  case 2:
+  case SLEEPING:
     sleeping_list = new_head;
     break;
-  case 3:
+  case UNUSED:
     unused_list = new_head;
     break;
 
@@ -131,7 +129,7 @@ set_head(struct proc *new_head, int list_type, int cpu_num){
 }
 
 int
-remove_proc_from_list(struct proc *p, int list_type)
+remove_proc_from_list(struct proc *p, enum procstate list_type)
 {
   acquire_list(list_type, p->cpu_num);
   struct proc *curr = get_head(list_type, p->cpu_num);
@@ -140,7 +138,7 @@ remove_proc_from_list(struct proc *p, int list_type)
     return 0;
   }
   struct proc *prev = 0;
-  if (p == curr){ //p is head
+  if(p == curr){ //p is head
     acquire(&p->link_lock);
     set_head(curr->next, list_type, p->cpu_num);
     p->next = 0;
@@ -152,33 +150,36 @@ remove_proc_from_list(struct proc *p, int list_type)
   while(curr){
     acquire(&curr->link_lock);
     if(p == curr){
-      acquire(&prev->link_lock);
-      release_list(list_type, p->cpu_num); //todo
+      // acquire(&prev->link_lock);
+      // if(!prev){
+      //   release_list(list_type, p->cpu_num); //todo
+      // }
       prev->next = curr->next;
       curr->next = 0;
-      release(&prev->link_lock);
       release(&curr->link_lock);
+      release(&prev->link_lock);
       return 1; 
     }
-    else {
+      if(!prev){
+        release_list(list_type, p->cpu_num); //todo
+      }
+      else{
+        release(&prev->link_lock);
+      }
+
       prev = curr;
       curr = curr->next;
-      release(&prev->link_lock);
-    }
-
-    if(!prev){
-      release_list(list_type, p->cpu_num); //todo
-    }
+    
   }
   return 0;
 }
 
 int
-add_proc_to_list(struct proc *p, int list_type, int cpu_num)
+add_proc_to_list(struct proc *p, enum procstate list_type, int cpu_num)
 {
   struct proc *curr = 0;
   acquire_list(list_type, cpu_num);
-  curr = get_head(list_type, p->cpu_num);
+  curr = get_head(list_type, cpu_num);
   if(!curr){ //empty list
     set_head(p, list_type, cpu_num);
     release_list(list_type, cpu_num);
@@ -187,17 +188,39 @@ add_proc_to_list(struct proc *p, int list_type, int cpu_num)
   struct proc *prev = 0;
   while(curr){
     acquire(&curr->link_lock);
-    if(!curr->next){
-      curr->next = p;
-      release(&curr->link_lock);
+    if(prev){
+      release(&prev->link_lock);
+    }
+    else{
       release_list(list_type, cpu_num);
-      return 1;
     }
     prev = curr;
     curr = curr->next;
-    release(&prev->link_lock);
+    // release(&prev->link_lock);
   }
-  return 0;
+  // acquire(&prev->link_lock);
+  prev->next = p;
+  release(&prev->link_lock);
+  // release_list(list_type, cpu_num);
+  return 1;
+}
+
+void
+decrease_runnable_list_size_of(int cpu_num){
+  struct cpu* c = &cpus[cpu_num];
+  uint64 old;
+  do{
+    old = c->proc_list_size;
+  } while(cas(&c->proc_list_size, old, old-1));
+}
+
+void
+increase_runnable_list_size_of(int cpu_num){
+  struct cpu* c = &cpus[cpu_num];
+  uint64 old;
+  do{
+    old = c->proc_list_size;
+  } while(cas(&c->proc_list_size, old, old+1));
 }
 
 // Allocate a page for each process's kernel stack.
@@ -224,9 +247,22 @@ procinit(void)
   
   initlock(&pid_lock, "nextpid");
   initlock(&wait_lock, "wait_lock");
+  initlock(&zombie_list_head_lock, "zombie_list_head_lock");
+  initlock(&sleeping_list_head_lock, "sleeping_list_head_lock");
+  initlock(&unused_list_head_lock, "unused_list_head_lock");
+
+  struct spinlock* sl;
+  for(sl = ready_list_head_locks; sl <&ready_list_head_locks[CPUS]; sl++){
+    initlock(sl, "ready_list_head_locks");
+  }
+
   for(p = proc; p < &proc[NPROC]; p++) {
       initlock(&p->lock, "proc");
+      initlock(&p->link_lock, "link_lock");
+      p->cpu_num = -1;
+      p->next = 0;
       p->kstack = KSTACK((int) (p - proc));
+      add_proc_to_list(p, UNUSED, 0);
   }
 }
 
@@ -268,12 +304,6 @@ allocpid() {
   } while (cas(&nextpid, pid, pid + 1));
 
   return pid;
-  
-  // old allocpid
-  // acquire(&pid_lock);
-  // pid = nextpid;
-  // nextpid = nextpid + 1;
-  // release(&pid_lock);
 }
 
 // Look in the process table for an UNUSED proc.
@@ -284,20 +314,18 @@ static struct proc*
 allocproc(void)
 {
   struct proc *p;
-
-  for(p = proc; p < &proc[NPROC]; p++) {
-    acquire(&p->lock);
-    if(p->state == UNUSED) {
-      goto found;
-    } else {
-      release(&p->lock);
-    }
+  p = remove_head(UNUSED, 0);
+  if(!p){
+    return 0;
   }
+  acquire(&p->lock);
+  goto found;
   return 0;
 
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->next = 0;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -342,7 +370,10 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  remove_proc_from_list(p, ZOMBIE);
   p->state = UNUSED;
+  add_proc_to_list(p, UNUSED, 0);
+
 }
 
 // Create a user page table for a given process,
@@ -404,6 +435,15 @@ uchar initcode[] = {
 void
 userinit(void)
 {
+  if(!is_initialize){
+    struct cpu* c;
+    for(c = cpus; c < &cpus[CPUS]; c++){
+      c->runnable_list_head = 0;
+      c->proc_list_size = 0;
+    }
+    is_initialize = 1;
+  }
+
   struct proc *p;
 
   p = allocproc();
@@ -422,6 +462,10 @@ userinit(void)
   p->cwd = namei("/");
 
   p->state = RUNNABLE;
+  p->cpu_num = 0;
+  add_proc_to_list(p, RUNNABLE, p->cpu_num);
+  increase_runnable_list_size_of(p->cpu_num);
+  set_head(p, RUNNABLE, p->cpu_num);
 
   release(&p->lock);
 }
@@ -492,6 +536,9 @@ fork(void)
 
   acquire(&np->lock);
   np->state = RUNNABLE;
+  np->cpu_num = p->cpu_num;
+  add_proc_to_list(np, RUNNABLE, p->cpu_num);
+  increase_runnable_list_size_of(p->cpu_num);
   release(&np->lock);
 
   return pid;
@@ -549,6 +596,8 @@ exit(int status)
 
   p->xstate = status;
   p->state = ZOMBIE;
+  add_proc_to_list(p, ZOMBIE, 0);
+  decrease_runnable_list_size_of(p->cpu_num);
 
   release(&wait_lock);
 
@@ -599,12 +648,42 @@ wait(uint64 addr)
     if(!havekids || p->killed){
       release(&wait_lock);
       extern uint64 cas(volatile void *addr, int expected, int newval);
-return -1;
+      return -1;
     }
     
     // Wait for a child to exit.
     sleep(p, &wait_lock);  //DOC: wait-sleep
   }
+}
+
+struct proc* 
+remove_head(enum procstate list_type, int cpu_num)
+{
+  acquire_list(list_type, cpu_num);
+  struct proc* head = get_head(list_type, cpu_num);
+  if(!head){
+    release_list(list_type, cpu_num);
+  }
+  else{
+    acquire(&head->link_lock);
+    set_head(head->next, list_type, cpu_num);
+    head->next = 0;
+    release(&head->link_lock);
+    release_list(list_type, cpu_num);
+  }
+  return head;
+  // printf("r_h before ac\n");
+  // acquire_list(list_type, cpu_num);
+  // printf("r_h after ac\n");
+  // struct proc *head = get_head(list_type, cpu_num);
+  // printf("r_h before rel\n");
+  // release_list(list_type, cpu_num);
+  // printf("r_h after rel\n");
+  // printf("NEVO NEVO NEVO NEVO NEVO NEVO NEVO NEVO \n");
+  // printf("%s\n",head->name);
+  // printf("%d\n", is_initialize);
+  // remove_proc_from_list(head, list_type);
+  // return head;
 }
 
 // Per-CPU process scheduler.
@@ -617,30 +696,26 @@ return -1;
 void
 scheduler(void)
 {
-  struct proc *p;
   struct cpu *c = mycpu();
-  
-  c->proc = 0;
+  struct proc *curr; 
+  c->proc=0;
   for(;;){
     // Avoid deadlock by ensuring that devices can interrupt.
     intr_on();
-
-    for(p = proc; p < &proc[NPROC]; p++) {
-      acquire(&p->lock);
-      if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        swtch(&c->context, &p->context);
-
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        c->proc = 0;
-      }
-      release(&p->lock);
+    curr = remove_head(RUNNABLE, cpuid());
+    if(!curr){
+      continue;
     }
+    acquire(&curr->lock);
+    if(curr->state != RUNNABLE){
+      // printf("%d\n",curr->state);
+      panic("proc is not RUNNABLE");
+    }
+    curr->state = RUNNING;
+    c->proc = curr;
+    swtch(&c->context, &curr->context);
+    c->proc = 0;
+    release(&curr->lock);
   }
 }
 
@@ -678,6 +753,7 @@ yield(void)
   struct proc *p = myproc();
   acquire(&p->lock);
   p->state = RUNNABLE;
+  add_proc_to_list(p, RUNNABLE, p->cpu_num);
   sched();
   release(&p->lock);
 }
@@ -718,11 +794,15 @@ sleep(void *chan, struct spinlock *lk)
   // so it's okay to release lk.
 
   acquire(&p->lock);  //DOC: sleeplock1
-  release(lk);
+  
 
   // Go to sleep.
   p->chan = chan;
   p->state = SLEEPING;
+  decrease_runnable_list_size_of(p->cpu_num);
+  add_proc_to_list(p, SLEEPING, 0);
+  
+  release(lk);
 
   sched();
 
@@ -745,7 +825,10 @@ wakeup(void *chan)
     if(p != myproc()){
       acquire(&p->lock);
       if(p->state == SLEEPING && p->chan == chan) {
+        remove_proc_from_list(p, SLEEPING);
         p->state = RUNNABLE;
+        add_proc_to_list(p, RUNNABLE, p->cpu_num);
+        increase_runnable_list_size_of(p->cpu_num);
       }
       release(&p->lock);
     }
@@ -765,8 +848,11 @@ kill(int pid)
     if(p->pid == pid){
       p->killed = 1;
       if(p->state == SLEEPING){
+        remove_proc_from_list(p, SLEEPING);
         // Wake process from sleep().
         p->state = RUNNABLE;
+        add_proc_to_list(p, RUNNABLE, p->cpu_num);
+        increase_runnable_list_size_of(p->cpu_num);
       }
       release(&p->lock);
       return 0;
@@ -835,23 +921,6 @@ procdump(void)
   }
 }
 
-void
-decrease_runnable_list_size_of(int cpu_id){
-  struct cpu* c = &cpus[cpu_id];
-  uint64 old;
-  do{
-    old = c->list_size;
-  } while(cas(&c->list_size, old, old-1));
-}
-
-void
-increase_runnable_list_size_of(int cpu_id){
-  struct cpu* c = &cpus[cpu_id];
-  uint64 old;
-  do{
-    old = c->list_size;
-  } while(cas(&c->list_size, old, old+1));
-}
 
 int 
 range_check(int num, int min, int max)
