@@ -1,3 +1,10 @@
+#define OFF 0
+#define ON 1
+
+#ifndef BLNCFLG
+#define BLNCFLG OFF
+#endif
+
 // Saved registers for kernel context switches.
 struct context {
   uint64 ra;
@@ -26,6 +33,7 @@ struct cpu {
   int intena;                 // Were interrupts enabled before push_off()?
   struct proc *runnable_list_head;
   uint64 proc_list_size;
+  uint64 admitted_process_count;
 };
 
 extern struct cpu cpus[NCPU];

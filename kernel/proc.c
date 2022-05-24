@@ -205,6 +205,13 @@ add_proc_to_list(struct proc *p, enum procstate list_type, int cpu_num)
   return 1;
 }
 
+void increase_admitted_process_count(int cpu_num){
+  struct cpu* c = &cpus[cpu_num];
+  uint64 old;
+  do{
+    old = c->admitted_process_count;
+  } while(cas(&c->admitted_process_count, old, old+1));
+}
 void
 decrease_runnable_list_size_of(int cpu_num){
   struct cpu* c = &cpus[cpu_num];
@@ -440,6 +447,7 @@ userinit(void)
     for(c = cpus; c < &cpus[CPUS]; c++){
       c->runnable_list_head = 0;
       c->proc_list_size = 0;
+      c->admitted_process_count = 0;
     }
     is_initialize = 1;
   }
@@ -490,6 +498,18 @@ growproc(int n)
   return 0;
 }
 
+int
+find_least_used_cpu()
+{
+  int least_used_cpu_num = 0;
+  for(int i = 1; i<CPUS; i++){
+    if(cpus[i].admitted_process_count < cpus[least_used_cpu_num].admitted_process_count){
+      least_used_cpu_num = i;
+    }
+  }
+  return least_used_cpu_num;
+}
+
 // Create a new process, copying the parent.
 // Sets up child kernel stack to return as if from fork() system call.
 int
@@ -536,9 +556,12 @@ fork(void)
 
   acquire(&np->lock);
   np->state = RUNNABLE;
-  np->cpu_num = p->cpu_num;
-  add_proc_to_list(np, RUNNABLE, p->cpu_num);
-  increase_runnable_list_size_of(p->cpu_num);
+  int cpu_num = (BLNCFLG)? find_least_used_cpu(): p->cpu_num;
+  np->cpu_num = cpu_num;
+  add_proc_to_list(np, RUNNABLE, cpu_num);
+  increase_admitted_process_count(cpu_num);
+  cpus[cpu_num].admitted_process_count ++;
+  increase_runnable_list_size_of(cpu_num);
   release(&np->lock);
 
   return pid;
@@ -686,6 +709,24 @@ remove_head(enum procstate list_type, int cpu_num)
   // return head;
 }
 
+struct proc* steal_process(){
+  struct proc *res = 0;
+  int my_cpu_num = cpuid();
+  for(int i = 0; i<CPUS; i++){
+    if(my_cpu_num != i){
+      res = remove_head(RUNNABLE,i);
+      if(res){
+        acquire(&res->link_lock);
+        res->cpu_num = my_cpu_num;
+        release(&res->link_lock);
+        decrease_runnable_list_size_of(i);
+        increase_admitted_process_count(my_cpu_num);
+        break;
+      }
+    }
+  }
+  return res;
+}
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
 // Scheduler never returns.  It loops, doing:
@@ -704,6 +745,7 @@ scheduler(void)
     intr_on();
     curr = remove_head(RUNNABLE, cpuid());
     if(!curr){
+      // curr = steal_process();
       continue;
     }
     acquire(&curr->lock);
@@ -827,8 +869,10 @@ wakeup(void *chan)
       if(p->state == SLEEPING && p->chan == chan) {
         remove_proc_from_list(p, SLEEPING);
         p->state = RUNNABLE;
-        add_proc_to_list(p, RUNNABLE, p->cpu_num);
-        increase_runnable_list_size_of(p->cpu_num);
+        int cpu_num = (BLNCFLG)? find_least_used_cpu(): p->cpu_num; 
+        add_proc_to_list(p, RUNNABLE, cpu_num);
+        increase_admitted_process_count(cpu_num);
+        increase_runnable_list_size_of(cpu_num);
       }
       release(&p->lock);
     }
@@ -954,4 +998,8 @@ int
 get_cpu()
 {
   return myproc()->cpu_num;
+}
+
+int cpu_process_count(int cpu_num){
+  return cpus[cpu_num].admitted_process_count;
 }
